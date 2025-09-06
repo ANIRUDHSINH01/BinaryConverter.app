@@ -1,200 +1,136 @@
-# .github/workflows/publish-app.yml
-name: Build & Publish for Indus Appstore
+# .github/workflows/auto-build-indus.yml
+name: Auto Build APK for Indus
 
 on:
   push:
     branches:
       - main
     tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      release_notes:
-        description: 'Release Notes for GitHub Release'
-        required: false
-        default: 'New version built for Indus Appstore submission.'
+      - 'v*' # Triggers on version tags like v1.0.0
+  workflow_dispatch: # Allows manual triggering
 
 permissions:
-  contents: write
+  contents: write # Needed to create releases
 
 jobs:
-  pre_checks:
-    name: Pre-Build Validations
+  build_and_release:
+    name: Build APK and Create Release
     runs-on: ubuntu-latest
-    outputs:
-      is_tagged_release: ${{ steps.check_tag.outputs.is_tagged }}
-      release_tag: ${{ steps.check_tag.outputs.tag }}
-      release_notes: ${{ steps.set_release_notes.outputs.notes }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Check for Tagged Release
-        id: check_tag
-        run: |
-          TAG=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          if [[ $TAG == v* ]]; then
-            echo "is_tagged=true" >> $GITHUB_OUTPUT
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
-          else
-            echo "is_tagged=false" >> $GITHUB_OUTPUT
-            echo "tag=build-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
-          fi
-          echo "Detected Release Identifier: $TAG"
-
-      - name: Set Release Notes
-        id: set_release_notes
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            NOTES="${{ github.event.inputs.release_notes }}"
-          elif [[ "${{ steps.check_tag.outputs.is_tagged }}" == "true" ]]; then
-            NOTES="Release ${{ steps.check_tag.outputs.tag }} built for Indus Appstore."
-          else
-            NOTES="Development build (commit: $GITHUB_SHA) prepared for Indus Appstore testing."
-          fi
-          echo "notes=$NOTES" >> $GITHUB_OUTPUT
-
-  build_for_indus:
-    name: Build APK for Indus
-    needs: pre_checks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    outputs:
-      artifact_name: android-apk-${{ needs.pre_checks.outputs.release_tag }}
-      build_version: ${{ needs.pre_checks.outputs.release_tag }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js Environment
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: 'npm'
 
-      - name: Setup Expo CLI
-        run: npm install --global expo-cli
-
-      - name: Setup EAS CLI
-        run: npm install --global eas-cli
-
-      - name: Install Project Dependencies
+      - name: Install Dependencies
         run: npm ci
 
+      - name: Setup Expo CLI and Authenticate
+        run: |
+          echo "Installing EAS CLI..."
+          npm install -g eas-cli
+          echo "Authenticating with Expo..."
+          echo "${{ secrets.EXPO_TOKEN }}" | eas login --non-interactive
+          echo "Verifying login..."
+          eas whoami
+
       - name: Create Build Output Directory
-        run: mkdir -p ${{ runner.temp }}/indus-build-artifacts
+        run: mkdir -p ${{ runner.temp }}/apk-output
 
-      - name: Login to Expo (non-interactive)
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      - name: Build Android APK with EAS
+        id: eas_build
         run: |
-          if [ -z "$EXPO_TOKEN" ]; then
-            echo "::error::EXPO_TOKEN secret is not set!"
-            exit 1
-          fi
-          eas whoami --token $EXPO_TOKEN
-
-      - name: Trigger Android APK Build with EAS
-        id: build_android_apk
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          echo "Starting Android APK build (production profile)..."
-          echo "Build Version/Tag: ${{ needs.pre_checks.outputs.release_tag }}"
-          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --output ${{ runner.temp }}/indus-build-artifacts/ 2>&1)
+          echo "Starting EAS build for Android APK (production profile)..."
+          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --output-dir ${{ runner.temp }}/apk-output 2>&1)
           echo "$BUILD_OUTPUT"
+
+          # --- Extract Build URL ---
           BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/accounts/[^ ]*' | head -n 1)
-          if [ -n "$BUILD_URL" ]; then
-            echo "BUILD_URL_DEEP_LINK=$BUILD_URL" >> $GITHUB_ENV
+          if [[ -n "$BUILD_URL" ]]; then
+            echo "build_url=$BUILD_URL" >> $GITHUB_OUTPUT
           else
-            echo "BUILD_URL_DEEP_LINK=NOT_FOUND_IN_LOGS" >> $GITHUB_ENV
+            echo "build_url=NOT_FOUND" >> $GITHUB_OUTPUT
           fi
 
-      - name: Make sure APK exists
+      - name: Check for APK Artifact
+        id: check_apk
         run: |
-          APK_FILE=$(find ${{ runner.temp }}/indus-build-artifacts -name "*.apk" | head -n 1)
-          if [[ -z "$APK_FILE" ]]; then
-            echo "::error::No .apk file found in build output!"
+          APK_PATH=$(find ${{ runner.temp }}/apk-output -name "*.apk" | head -n 1)
+          if [[ -z "$APK_PATH" ]]; then
+            echo "::error::No APK file found in the build output directory!"
+            ls -la ${{ runner.temp }}/apk-output
             exit 1
           fi
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK_PATH"
 
-      - name: Upload Android APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-apk-${{ needs.pre_checks.outputs.release_tag }}
-          path: ${{ runner.temp }}/indus-build-artifacts/
-          if-no-files-found: error
-
-  create_indus_release:
-    name: Create GitHub Release for Indus
-    needs: [pre_checks, build_for_indus]
-    runs-on: ubuntu-latest
-    if: needs.build_for_indus.result == 'success'
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Download Android APK Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build_for_indus.outputs.artifact_name }}
-          path: /tmp/downloaded-apk
-
-      - name: Find APK File
-        id: find_apk
+      - name: Determine Release Tag
+        id: get_tag
         run: |
-          APK_FILE=$(find /tmp/downloaded-apk -name "*.apk" | head -n 1)
-          if [[ -z "$APK_FILE" ]]; then
-            echo "::error::No .apk file found in downloaded artifacts!"
-            exit 1
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            TAG=${GITHUB_REF#refs/tags/}
+          else
+            TAG="build-$(date +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}"
           fi
-          echo "apk_path=$APK_FILE" >> $GITHUB_OUTPUT
-          echo "Found APK for release: $APK_FILE"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ needs.pre_checks.outputs.release_tag }}
-          name: Release ${{ needs.pre_checks.outputs.release_tag }} (Indus Ready)
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          release_name: Release ${{ steps.get_tag.outputs.tag }} (Indus APK)
           body: |
-            ${{ needs.pre_checks.outputs.release_notes }}
+            ## Binary Converter App APK for Indus Appstore
 
-            ## Artifact for Indus Appstore
-            The Android APK file (`$(basename ${{ steps.find_apk.outputs.apk_path }})`) is attached to this release.
+            This release contains the Android APK built for submission to the Indus Appstore.
 
-            ## Next Steps for Indus Submission
+            ### Download
+            The APK file (`$(basename ${{ steps.check_apk.outputs.apk_path }})`) is attached to this release.
+
+            ### Build Details
+            - **Build Trigger:** ${{ github.event_name }}
+            - **Commit:** ${{ github.sha }}
+            - **Expo Build URL (Monitor Progress):** ${{ steps.eas_build.outputs.build_url }}
+
+            ### Next Steps for Indus Submission
             1. Download the APK asset from this release.
             2. Log in to the [Indus Appstore Developer Console](https://indusappstore.com/developer).
             3. Navigate to the app submission section.
             4. Upload the downloaded APK file.
-            5. Fill in the app details (most can be taken from your `app.json`):
-               * Package Name: `com.anirudhsinh.binaryconverter`
-               * Version: `${{ needs.pre_checks.outputs.release_tag }}`
-               * App Name: Binary Converter
-               * Description: (from app.json)
-               * Category: Tools/Productivity
-               * Privacy Policy URL: `https://anirudhsinh01.github.io/BinaryConverter/`
-               * Upload screenshots (you'll need to create these).
-               * Submit for review.
-          draft: false
-          prerelease: ${{ needs.pre_checks.outputs.is_tagged_release != 'true' }}
-          files: ${{ steps.find_apk.outputs.apk_path }}
+            5. Fill in the app details:
+                - Package Name: `com.anirudhsinh.binaryconverter` (from app.json)
+                - Version: Check app.json/eas.json or the APK itself
+                - App Name: Binary Converter
+                - Description: (from app.json)
+                - Category: Tools/Productivity
+                - Privacy Policy URL: `https://anirudhsinh01.github.io/BinaryConverter/`
+                - Upload required screenshots.
+            6. Submit for review.
 
-      - name: Report Completion
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Upload APK to Release
+        run: |
+          echo "Uploading APK: ${{ steps.check_apk.outputs.apk_path }} to release ${{ steps.get_tag.outputs.tag }}"
+          gh release upload ${{ steps.get_tag.outputs.tag }} "${{ steps.check_apk.outputs.apk_path }}" --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize Workflow
         if: success()
         run: |
-          echo "=== BUILD AND RELEASE FOR INDUS COMPLETED SUCCESSFULLY ==="
-          echo "Release Tag: ${{ needs.pre_checks.outputs.release_tag }}"
-          echo "APK Uploaded to Release: $(basename ${{ steps.find_apk.outputs.apk_path }})"
-          echo "------------------------------------------------------------------------"
-          echo "NEXT STEPS:"
-          echo "1. Go to the release page: https://github.com/${{ github.repository }}/releases/tag/${{ needs.pre_checks.outputs.release_tag }}"
-          echo "2. Download the APK asset."
-          echo "3. Submit the APK to the Indus Appstore Developer Console."
-          echo "========================================================================"
-          if [[ "${{ env.BUILD_URL_DEEP_LINK }}" != "NOT_FOUND_IN_LOGS" ]]; then
-            echo "You can also monitor the build progress/details on Expo.dev (if needed):"
-            echo "Expo Build Link: ${{ env.BUILD_URL_DEEP_LINK }}"
-          fi
+          echo "===== WORKFLOW COMPLETED SUCCESSFULLY ====="
+          echo "Release Tag: ${{ steps.get_tag.outputs.tag }}"
+          echo "APK Uploaded: $(basename ${{ steps.check_apk.outputs.apk_path }})"
+          echo "Expo Build URL: ${{ steps.eas_build.outputs.build_url }}"
+          echo "=========================================="
+          echo "Next Step: Go to the release page and download the APK for Indus submission."
+          
