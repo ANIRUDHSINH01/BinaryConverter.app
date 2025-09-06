@@ -1,0 +1,96 @@
+# .github/workflows/publish-app.yml
+name: Build and Prepare App for Publishing
+
+on:
+  push:
+    branches:
+      - main # Adjust if your release branch is named differently (e.g., 'release')
+  # Optionally, allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build App with EAS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18 # Use the Node.js version compatible with your Expo SDK
+          cache: 'npm' # Cache node_modules based on package-lock.json
+
+      - name: Setup Expo Toolkit
+        uses: expo/expo-github-action@v8
+        with:
+          # You need to create a Personal Access Token (PAT) on Expo.dev
+          # with the 'build' scope and add it as a secret named EXPO_TOKEN in your GitHub repo.
+          expo-token: ${{ secrets.EXPO_TOKEN }}
+          # Pin to a specific EAS CLI version for consistency
+          eas-version: latest # Or pin to a specific version like 14.1.0
+
+      - name: Install Project Dependencies
+        run: npm ci # Use npm ci for clean, reproducible builds based on package-lock.json
+
+      - name: Verify EAS Configuration
+        run: |
+          echo "Checking eas.json..."
+          cat eas.json
+          echo "Running eas build:inspect to verify configuration..."
+          # This checks the build configuration without starting a build
+          eas build:inspect --platform android --profile production --non-interactive || echo "Warning: eas build:inspect failed, proceeding with build."
+
+      - name: Trigger Android Build (App Bundle - Preferred for Play Store)
+        id: build_android
+        run: |
+          echo "Starting Android build (production profile)..."
+          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --output-dir ${{ runner.temp }}/build-artifacts/)
+          echo "$BUILD_OUTPUT"
+          # Extract the build URL if possible (basic attempt)
+          BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/accounts/[^ ]*' | head -n 1)
+          if [ -n "$BUILD_URL" ]; then
+            echo "ANDROID_BUILD_URL=$BUILD_URL" >> $GITHUB_ENV
+          else
+            echo "ANDROID_BUILD_URL=NOT_FOUND" >> $GITHUB_ENV
+          fi
+
+      # --- Optional: Trigger iOS Build ---
+      # Uncomment the lines below if you also want to build for iOS.
+      # Make sure you have configured iOS build settings in eas.json.
+      # - name: Trigger iOS Build (IPA)
+      #   id: build_ios
+      #   run: |
+      #     echo "Starting iOS build (production profile)..."
+      #     BUILD_OUTPUT=$(eas build --platform ios --profile production --non-interactive --output-dir ${{ runner.temp }}/build-artifacts/)
+      #     echo "$BUILD_OUTPUT"
+      #     BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/accounts/[^ ]*' | head -n 1)
+      #     if [ -n "$BUILD_URL" ]; then
+      #       echo "IOS_BUILD_URL=$BUILD_URL" >> $GITHUB_ENV
+      #     else
+      #       echo "IOS_BUILD_URL=NOT_FOUND" >> $GITHUB_ENV
+      #     fi
+
+      - name: Upload Android Build Artifacts (AAB)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-app-bundle
+          path: ${{ runner.temp }}/build-artifacts/*.aab # Adjust path if EAS outputs differently
+          if-no-files-found: warn # Warn if no AAB found, but don't fail the job
+
+      # - name: Upload iOS Build Artifacts (IPA) # Uncomment if building iOS
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ios-app-archive
+      #     path: ${{ runner.temp }}/build-artifacts/*.ipa # Adjust path if EAS outputs differently
+      #     if-no-files-found: warn
+
+      - name: Report Build Completion
+        run: |
+          echo "=== Build Process Completed ==="
+          echo "Android Build URL (if available): ${{ env.ANDROID_BUILD_URL }}"
+          # echo "iOS Build URL (if available): ${{ env.IOS_BUILD_URL }}" # Uncomment if building iOS
+          echo "==============================="
+          echo "Downloadable artifacts (AAB/IPA) are available in the workflow run summary under 'Artifacts'."
+          echo "You can now manually download these and upload them to the respective app stores."
