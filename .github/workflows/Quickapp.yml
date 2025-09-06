@@ -1,0 +1,24 @@
+name: Fast APK Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - run: npm ci
+      - run: npm install -g eas-cli
+      - run: mkdir -p apk-output
+      - run: eas build --platform android --profile production --non-interactive --wait --output-dir apk-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: apk-output/*.apk
