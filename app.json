@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "Binary Converter",
+    "slug": "binary-converter",
+    "version": "1.0.0",
+    "description": "Convert text to binary and back with this simple utility app. Perfect for students, developers, and anyone curious about how text is represented in binary.",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "binaryconverter",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anirudhsinh.binaryconverter",
+      "buildNumber": "1.0.0"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.anirudhsinh.binaryconverter",
+      "versionCode": 1
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "privacyPolicyUrl": "https://anirudhsinh01.github.io/BinaryConverter/"
+    }
+  }
+}
