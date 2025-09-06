@@ -34,7 +34,7 @@ jobs:
           echo "Installing EAS CLI..."
           npm install -g eas-cli
           echo "Authenticating with Expo..."
-          echo "${{ secrets.EXPO_TOKEN }}" | eas login --non-interactive
+          echo "${{ secrets.EXPO_TOKEN }}" | eas login
           echo "Verifying login..."
           eas whoami
 
