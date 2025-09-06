@@ -1,13 +1,12 @@
-# .github/workflows/build-for-indus.yml
-name: Build for Indus Appstore
+# .github/workflows/publish-app.yml
+name: Build & Publish for Indus Appstore
 
 on:
   push:
     branches:
-      - main # Run on pushes to main
+      - main
     tags:
-      - 'v*' # Run on version tags like v1.0.0, v2.1.3
-  # Allow manual triggering
+      - 'v*'
   workflow_dispatch:
     inputs:
       release_notes:
@@ -15,12 +14,10 @@ on:
         required: false
         default: 'New version built for Indus Appstore submission.'
 
-# Explicit permissions needed
 permissions:
-  contents: write # To create releases
+  contents: write
 
 jobs:
-  # --- PRE-BUILD CHECKS ---
   pre_checks:
     name: Pre-Build Validations
     runs-on: ubuntu-latest
@@ -41,7 +38,7 @@ jobs:
             echo "tag=$TAG" >> $GITHUB_OUTPUT
           else
             echo "is_tagged=false" >> $GITHUB_OUTPUT
-            echo "tag=build-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT # Use commit SHA for non-tags
+            echo "tag=build-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
           fi
           echo "Detected Release Identifier: $TAG"
 
@@ -57,12 +54,10 @@ jobs:
           fi
           echo "notes=$NOTES" >> $GITHUB_OUTPUT
 
-  # --- BUILD JOB ---
   build_for_indus:
     name: Build APK for Indus
     needs: pre_checks
     runs-on: ubuntu-latest
-    # Run on push/tag or manual dispatch
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     outputs:
       artifact_name: android-apk-${{ needs.pre_checks.outputs.release_tag }}
@@ -77,12 +72,11 @@ jobs:
           node-version: 18
           cache: 'npm'
 
-      - name: Setup Expo Toolkit
-        uses: expo/expo-github-action@v8
-        with:
-          # Use the CORRECT parameter name for the Expo token
-          token: ${{ secrets.EXPO_TOKEN }} # Ensure EXPO_TOKEN secret is set in repo settings
-          eas-version: latest
+      - name: Setup Expo CLI
+        run: npm install --global expo-cli
+
+      - name: Setup EAS CLI
+        run: npm install --global eas-cli
 
       - name: Install Project Dependencies
         run: npm ci
@@ -90,17 +84,25 @@ jobs:
       - name: Create Build Output Directory
         run: mkdir -p ${{ runner.temp }}/indus-build-artifacts
 
-      - name: Trigger Android APK Build
+      - name: Login to Expo (non-interactive)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN secret is not set!"
+            exit 1
+          fi
+          eas whoami --token $EXPO_TOKEN
+
+      - name: Trigger Android APK Build with EAS
         id: build_android_apk
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           echo "Starting Android APK build (production profile)..."
           echo "Build Version/Tag: ${{ needs.pre_checks.outputs.release_tag }}"
-          
-          # Run EAS Build for Android Production (should produce APK based on eas.json)
-          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --output-dir ${{ runner.temp }}/indus-build-artifacts/ 2>&1)
+          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --output ${{ runner.temp }}/indus-build-artifacts/ 2>&1)
           echo "$BUILD_OUTPUT"
-          
-          # --- Attempt to extract Build ID or URL for user reference ---
           BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/accounts/[^ ]*' | head -n 1)
           if [ -n "$BUILD_URL" ]; then
             echo "BUILD_URL_DEEP_LINK=$BUILD_URL" >> $GITHUB_ENV
@@ -108,23 +110,28 @@ jobs:
             echo "BUILD_URL_DEEP_LINK=NOT_FOUND_IN_LOGS" >> $GITHUB_ENV
           fi
 
-      # --- UPLOAD BUILD ARTIFACTS AS JOB ARTIFACTS ---
+      - name: Make sure APK exists
+        run: |
+          APK_FILE=$(find ${{ runner.temp }}/indus-build-artifacts -name "*.apk" | head -n 1)
+          if [[ -z "$APK_FILE" ]]; then
+            echo "::error::No .apk file found in build output!"
+            exit 1
+          fi
+
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk-${{ needs.pre_checks.outputs.release_tag }}
           path: ${{ runner.temp }}/indus-build-artifacts/
-          if-no-files-found: error # Fail if no APK was produced
+          if-no-files-found: error
 
-  # --- CREATE GITHUB RELEASE AND UPLOAD APK ---
   create_indus_release:
     name: Create GitHub Release for Indus
     needs: [pre_checks, build_for_indus]
     runs-on: ubuntu-latest
-    # Run only if the build was successful
     if: needs.build_for_indus.result == 'success'
     steps:
-      - name: Checkout Code (needed for gh release command context)
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Download Android APK Artifact
@@ -146,12 +153,11 @@ jobs:
 
       - name: Create GitHub Release
         id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Provided automatically by Actions
+        uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ needs.pre_checks.outputs.release_tag }}
-          release_name: Release ${{ needs.pre_checks.outputs.release_tag }} (Indus Ready)
+          name: Release ${{ needs.pre_checks.outputs.release_tag }} (Indus Ready)
           body: |
             ${{ needs.pre_checks.outputs.release_notes }}
 
@@ -159,28 +165,22 @@ jobs:
             The Android APK file (`$(basename ${{ steps.find_apk.outputs.apk_path }})`) is attached to this release.
 
             ## Next Steps for Indus Submission
-            1.  Download the APK asset from this release.
-            2.  Log in to the [Indus Appstore Developer Console](https://indusappstore.com/developer).
-            3.  Navigate to the app submission section.
-            4.  Upload the downloaded APK file.
-            5.  Fill in the app details (most can be taken from your `app.json`):
-                *   Package Name: `com.anirudhsinh.binaryconverter`
-                *   Version: `${{ needs.pre_checks.outputs.release_tag }}` (or from app.json)
-                *   App Name: Binary Converter
-                *   Description: (from app.json)
-                *   Category: Tools/Productivity
-                *   Privacy Policy URL: `https://anirudhsinh01.github.io/BinaryConverter/`
-                *   Upload screenshots (you'll need to create these).
-                *   Submit for review.
+            1. Download the APK asset from this release.
+            2. Log in to the [Indus Appstore Developer Console](https://indusappstore.com/developer).
+            3. Navigate to the app submission section.
+            4. Upload the downloaded APK file.
+            5. Fill in the app details (most can be taken from your `app.json`):
+               * Package Name: `com.anirudhsinh.binaryconverter`
+               * Version: `${{ needs.pre_checks.outputs.release_tag }}`
+               * App Name: Binary Converter
+               * Description: (from app.json)
+               * Category: Tools/Productivity
+               * Privacy Policy URL: `https://anirudhsinh01.github.io/BinaryConverter/`
+               * Upload screenshots (you'll need to create these).
+               * Submit for review.
           draft: false
           prerelease: ${{ needs.pre_checks.outputs.is_tagged_release != 'true' }}
-
-      - name: Upload APK to Release
-        run: |
-          echo "Uploading APK to release: ${{ steps.find_apk.outputs.apk_path }}"
-          gh release upload ${{ needs.pre_checks.outputs.release_tag }} "${{ steps.find_apk.outputs.apk_path }}" --clobber
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ steps.find_apk.outputs.apk_path }}
 
       - name: Report Completion
         if: success()
@@ -198,4 +198,3 @@ jobs:
             echo "You can also monitor the build progress/details on Expo.dev (if needed):"
             echo "Expo Build Link: ${{ env.BUILD_URL_DEEP_LINK }}"
           fi
-          
