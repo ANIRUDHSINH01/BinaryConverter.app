@@ -17,7 +17,10 @@ jobs:
       - run: npm ci
       - run: npm install -g eas-cli
       - run: mkdir -p apk-output
-      - run: eas login | eas build --platform android
+      - name: EAS Login
+        run: eas login --non-interactive --token ${{ secrets.EAS_TOKEN }}
+      - name: Build APK
+        run: eas build --platform android --output=apk-output/
       - uses: actions/upload-artifact@v4
         with:
           name: apk
