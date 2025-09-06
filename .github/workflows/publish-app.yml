@@ -25,92 +25,199 @@ jobs:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: npm
 
-      - uses: actions/cache@v4
+      - name: Cache node modules
+        uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: node-modules-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
-            node-modules-${{ runner.os }}-
+            ${{ runner.os }}-node-
 
-      - run: npm ci
-      - run: npm install -g eas-cli
-      - run: mkdir -p "${{ runner.temp }}/apk-output"
-
-      - id: eas_build
+      - name: Validate environment
         run: |
-          set -o pipefail
-          BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --wait --output-dir "${{ runner.temp }}/apk-output" 2>&1 || true)
-          BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/accounts/[^ ]*' | head -n1 || true)
-          echo "build_url=${BUILD_URL:-NOT_FOUND}" >> $GITHUB_OUTPUT
-
-      - id: find_apk
-        run: |
-          set -e
-          APK_PATH=$(find "${{ runner.temp }}/apk-output" -type f -name "*.apk" | head -n1 || true)
-          if [[ -z "$APK_PATH" ]]; then
+          if [ -z "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "Error: EXPO_TOKEN is not set"
             exit 1
           fi
+          echo "Environment validation passed"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli@latest
+
+      - name: Create output directory
+        run: mkdir -p "${{ runner.temp }}/apk-output"
+
+      - name: Build APK with EAS
+        id: eas_build
+        run: |
+          set -e
+          echo "Starting EAS build..."
+          
+          # Capture build output and handle potential failures
+          if BUILD_OUTPUT=$(eas build --platform android --profile production --non-interactive --wait --output-dir "${{ runner.temp }}/apk-output" 2>&1); then
+            echo "Build completed successfully"
+            echo "$BUILD_OUTPUT"
+            
+            # Extract build URL more reliably
+            BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -Eo 'https://expo\.dev/[^[:space:]]*' | head -n1 || echo "")
+            echo "build_url=${BUILD_URL}" >> $GITHUB_OUTPUT
+            echo "build_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "Build failed with output:"
+            echo "$BUILD_OUTPUT"
+            echo "build_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Find and validate APK
+        id: find_apk
+        run: |
+          set -e
+          
+          # Find APK file
+          APK_PATH=$(find "${{ runner.temp }}/apk-output" -type f -name "*.apk" | head -n1)
+          
+          if [[ -z "$APK_PATH" ]]; then
+            echo "Error: No APK file found in output directory"
+            ls -la "${{ runner.temp }}/apk-output" || echo "Output directory does not exist"
+            exit 1
+          fi
+          
+          # Validate APK file
+          if [[ ! -f "$APK_PATH" ]]; then
+            echo "Error: APK path exists but file is not readable"
+            exit 1
+          fi
+          
+          # Check file size (should be > 1MB for a real app)
+          APK_SIZE=$(stat -c%s "$APK_PATH")
+          if [[ $APK_SIZE -lt 1048576 ]]; then
+            echo "Warning: APK file seems unusually small ($APK_SIZE bytes)"
+          fi
+          
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
           echo "apk_filename=$(basename "$APK_PATH")" >> $GITHUB_OUTPUT
+          echo "apk_size=$APK_SIZE" >> $GITHUB_OUTPUT
+          
+          echo "Found APK: $(basename "$APK_PATH") ($(($APK_SIZE / 1024 / 1024)) MB)"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: apk-artifact
+          name: apk-artifact-${{ github.run_number }}
           path: ${{ steps.find_apk.outputs.apk_path }}
+          retention-days: 30
 
-      - id: get_tag
+      - name: Generate release tag
+        id: get_tag
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG=${GITHUB_REF#refs/tags/}
+            echo "Using existing tag: $TAG"
           else
-            TAG="build-$(date +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}"
+            # Generate more readable timestamp
+            TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+            SHORT_SHA=${GITHUB_SHA::7}
+            TAG="build-${TIMESTAMP}-${SHORT_SHA}"
+            echo "Generated tag: $TAG"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - id: release_notes
+      - name: Generate release notes
+        id: release_notes
         run: |
           APK_FILE="${{ steps.find_apk.outputs.apk_filename }}"
+          APK_SIZE_MB=$((${{ steps.find_apk.outputs.apk_size }} / 1024 / 1024))
+          BUILD_URL="${{ steps.eas_build.outputs.build_url }}"
+          
           cat > release_notes.md <<EOF
-## Binary Converter App APK (Indus Appstore)
-
-### Download
-The APK file (**${APK_FILE}**) is attached below.
-
-### Build Details
-- Trigger: \`${{ github.event_name }}\`
-- Commit: \`${{ github.sha }}\`
-- Expo Build URL: ${{ steps.eas_build.outputs.build_url }}
-
-### Indus Submission Steps
-1. Download the APK from this release.
-2. Upload it to the [Indus Appstore Developer Console](https://developer.indusappstore.com).
-3. Package Name: \`com.anirudhsinh.binaryconverter\`
-4. App Name: Binary Converter
-5. Category: Tools/Productivity
-6. Privacy Policy: [Link](https://anirudhsinh01.github.io/BinaryConverter/)
-7. Submit for review.
-EOF
+          ## Binary Converter App APK (Indus Appstore)
+          
+          ### 📱 Download
+          The APK file (**${APK_FILE}** - ${APK_SIZE_MB} MB) is attached below.
+          
+          ### 🔧 Build Details
+          - **Trigger**: \`${{ github.event_name }}\`
+          - **Commit**: [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+          - **Branch**: \`${{ github.ref_name }}\`
+          - **Build Time**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          - **Workflow Run**: [#${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          $(if [[ -n "$BUILD_URL" ]]; then echo "- **Expo Build URL**: $BUILD_URL"; fi)
+          
+          ### 🏪 Indus Appstore Submission Guide
+          1. Download the APK from this release
+          2. Visit the [Indus Appstore Developer Console](https://developer.indusappstore.com)
+          3. Upload the APK file
+          4. **App Details**:
+             - Package Name: \`com.anirudhsinh.binaryconverter\`
+             - App Name: Binary Converter
+             - Category: Tools/Productivity
+             - Privacy Policy: [View Policy](https://anirudhsinh01.github.io/BinaryConverter/)
+          5. Complete app metadata and submit for review
+          
+          ### ✅ Pre-submission Checklist
+          - [ ] APK downloaded and verified
+          - [ ] App metadata completed
+          - [ ] Screenshots uploaded
+          - [ ] Privacy policy linked
+          - [ ] App description written
+          - [ ] Submitted for review
+          EOF
+          
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
 
-      - env:
+      - name: Create GitHub Release
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.get_tag.outputs.tag }}"
-          IS_PRERELEASE=false
-          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
-            IS_PRERELEASE=true
+          
+          # Determine if this should be a prerelease
+          IS_PRERELEASE="false"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            IS_PRERELEASE="true"
           fi
-          gh release create "$TAG" \
-            --title "Release $TAG (Indus APK)" \
+          
+          echo "Creating release: $TAG (prerelease: $IS_PRERELEASE)"
+          
+          # Create release with better error handling
+          if gh release create "$TAG" \
+            --title "📱 Binary Converter App - Release $TAG" \
             --notes-file "${{ steps.release_notes.outputs.notes_file }}" \
-            --prerelease "$IS_PRERELEASE" \
-            "${{ steps.find_apk.outputs.apk_path }}"
+            --prerelease="$IS_PRERELEASE" \
+            "${{ steps.find_apk.outputs.apk_path }}"; then
+            echo "✅ Release created successfully"
+            echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          else
+            echo "❌ Failed to create release"
+            exit 1
+          fi
+
+      - name: Post-build summary
+        if: always()
+        run: |
+          echo "## 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ steps.eas_build.outputs.build_status || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **APK**: ${{ steps.find_apk.outputs.apk_filename || 'Not found' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size**: $((${{ steps.find_apk.outputs.apk_size || 0 }} / 1024 / 1024)) MB" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ steps.get_tag.outputs.tag || 'Not generated' }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ steps.eas_build.outputs.build_status }}" == "success" ]]; then
+            echo "✅ Build completed successfully!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Build failed or encountered issues" >> $GITHUB_STEP_SUMMARY
+          fi
