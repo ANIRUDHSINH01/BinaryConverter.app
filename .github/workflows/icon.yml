@@ -1,0 +1,101 @@
+# .github/workflows/generate-icons.yml
+name: Generate App Icons
+
+on:
+  workflow_dispatch: # Allows manual trigger
+  push:
+    branches:
+      - main # Adjust if your default branch is different
+    paths:
+      - 'assets/source-icon.png' # Only run when source icon changes
+
+jobs:
+  generate-icons:
+    name: Generate Icons
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # Use default token for committing
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      - name: Create Assets Directory
+        run: |
+          mkdir -p assets/images
+
+      - name: Delete Existing Generated Icons (if any)
+        run: |
+          echo "Checking for existing generated icons..."
+          ICONS_TO_DELETE=(
+            "assets/images/icon.png"
+            "assets/images/adaptive-icon.png"
+            "assets/images/splash-icon.png"
+            "assets/images/favicon.png"
+          )
+          
+          for icon in "${ICONS_TO_DELETE[@]}"; do
+            if [ -f "$icon" ]; then
+              echo "Deleting existing icon: $icon"
+              rm "$icon"
+            else
+              echo "Icon not found (skipping deletion): $icon"
+            fi
+          done
+          
+          echo "Existing icon deletion process completed."
+
+      - name: Generate Required Icon Sizes
+        run: |
+          # Check if source icon exists
+          if [ ! -f "assets/source-icon.png" ]; then
+            echo "Source icon not found at assets/source-icon.png. Please add it and push."
+            exit 1
+          fi
+          
+          echo "Generating new icons from source..."
+          # Resize to required dimensions
+          convert assets/source-icon.png -resize 1024x1024 assets/images/icon.png
+          convert assets/source-icon.png -resize 108x108 assets/images/adaptive-icon.png
+          convert assets/source-icon.png -resize 200x200 assets/images/splash-icon.png
+          convert assets/source-icon.png -resize 48x48 assets/images/favicon.png
+          
+          # Verify files were created
+          echo "Generated icons:"
+          ls -la assets/images/
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Add generated icons (this will stage new and modified files)
+          git add assets/images/
+          
+          # Commit if there are changes
+          if ! git diff --staged --quiet; then
+            echo "Changes detected, committing new icons..."
+            git commit -m "chore: regenerate app icons from source"
+            git push
+            echo "Icons regenerated and pushed successfully."
+          else
+            echo "No changes to commit. Icons were already up-to-date."
+          fi
+
+      - name: Verify Configuration
+        run: |
+          echo "Icon generation workflow completed successfully."
+          echo "Verify your app.json references these files:"
+          echo "  icon: ./assets/images/icon.png"
+          echo "  android.adaptiveIcon.foregroundImage: ./assets/images/adaptive-icon.png"
+          echo "  web.favicon: ./assets/images/favicon.png"
